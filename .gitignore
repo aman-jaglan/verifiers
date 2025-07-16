@@ -1,7 +1,6 @@
 # env 
 .venv/
 venv/
-env/
 .env
 .env.local
 uv.lock

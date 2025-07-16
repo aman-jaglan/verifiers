@@ -19,8 +19,8 @@ from typing import Any, Dict, List, Tuple
 from datasets import Dataset
 
 # CRM sandbox imports (kept optional for static analysers)
-from CRMArena.crm_sandbox.env import TOOLS  # type: ignore
-from CRMArena.crm_sandbox.env.env import ToolEnv as CRMSandboxToolEnv  # type: ignore
+from crm_sandbox.env import TOOLS  # type: ignore
+from crm_sandbox.env.env import ToolEnv as CRMSandboxToolEnv  # type: ignore
 
 from verifiers import MultiTurnEnv, ToolRubric, XMLParser, Message, Messages, State  # noqa: E501
 from verifiers.prompts import DEFAULT_TOOL_PROMPT_TEMPLATE

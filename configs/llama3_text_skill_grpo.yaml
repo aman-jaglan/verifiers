@@ -1,0 +1,59 @@
+# llama3_text_skill_grpo.yaml
+# --------------------------------------------------------------
+# Hyper-parameters for fine-tuning Meta-Llama-3.1-70B on the
+# CRMArena-Pro B2B *text-skill* tasks with GRPO + LoRA PEFT.
+# This file will be consumed by train_text_skill.py via
+#   GRPOConfig.from_yaml("configs/llama3_text_skill_grpo.yaml")
+# --------------------------------------------------------------
+
+# ---- model / tokenizer -----------------------------------------------------
+model_name: meta-llama/Meta-Llama-3.1-70B
+trust_remote_code: true
+
+# ---- training batch sizes --------------------------------------------------
+per_device_train_batch_size: 4        # micro-batch per H100
+gradient_accumulation_steps: 4        # effective batch 32 sequences
+num_train_epochs: 2
+max_steps: -1                         # use epochs
+
+# ---- logging & evaluation --------------------------------------------------
+logging_steps: 10
+save_steps: 250
+evaluation_strategy: steps
+eval_steps: 250                       # run val split every 250 steps (~¼ epoch)
+
+# ---- optimisation ----------------------------------------------------------
+learning_rate: 5.0e-5
+lr_scheduler_type: cosine
+warmup_ratio: 0.05
+adam_beta1: 0.9
+adam_beta2: 0.95
+adam_epsilon: 1.0e-8
+max_grad_norm: 1.0
+
+# ---- LoRA settings ---------------------------------------------------------
+peft:
+  lora_r: 64
+  lora_alpha: 128
+  lora_dropout: 0.05
+  target_modules:
+    - q_proj
+    - k_proj
+    - v_proj
+    - o_proj
+
+# ---- Reward normalisation --------------------------------------------------
+# enables moving average baseline & scaling inside GRPOTrainer
+normalize_rewards: true
+
+# ---- DeepSpeed (optional) --------------------------------------------------
+# Uncomment if you want ZeRO-3.
+# deepspeed_config:
+#   stage: 3
+#   offload_optimizer_device: none
+#   reduce_scatter: true
+
+# ---- W&B -------------------------------------------------------------------
+report_to: wandb
+wandb_project: crmarena_text_skill
+wandb_run_name: llama3_70b_b2b_grpo 

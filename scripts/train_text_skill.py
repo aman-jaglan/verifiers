@@ -22,7 +22,8 @@ from accelerate import Accelerator
 from datasets import Dataset
 from peft import LoraConfig
 
-from verifiers import GRPOConfig, GRPOTrainer, CRMArenaTextEnv  # type: ignore[attr-defined]
+from verifiers.trainers import GRPOConfig, GRPOTrainer  # direct import avoids __init__ gate
+from verifiers.envs.crmarena_text_env import CRMArenaTextEnv
 from verifiers.utils.model_utils import get_model_and_tokenizer
 
 # CRM assets

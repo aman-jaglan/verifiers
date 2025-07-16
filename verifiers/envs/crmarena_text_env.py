@@ -24,6 +24,41 @@ from crm_sandbox.env.env import ToolEnv as CRMSandboxToolEnv  # type: ignore
 
 from verifiers import MultiTurnEnv, ToolRubric, XMLParser, Message, Messages, State  # noqa: E501
 from verifiers.prompts import DEFAULT_TOOL_PROMPT_TEMPLATE
+from verifiers.envs.tool_env import format_tool_descriptions  # converts schema list to human-readable prompt
+
+
+# Helper to translate CRM-Arena __info__ dicts (OpenAI function-call style) into the
+# flattened schema expected by verifiers.envs.tool_env.format_tool_descriptions.
+def _convert_crm_schema(schema: Dict[str, Any]) -> Dict[str, Any]:
+    """Convert a CRM __info__ dict to the format used by Verifiers.
+
+    The CRM sandbox stores each tool description under the key ``function`` with
+    sub-fields ``name``, ``description``, ``parameters`` and ``returns``.  The
+    Verifiers formatter expects a flat dict with keys ``name``, ``description``,
+    ``args``, ``returns`` and optional ``examples``.
+    """
+
+    if "function" not in schema:  # already in the desired format
+        return schema
+
+    func = schema["function"]
+
+    # Extract argument list
+    arg_specs: Dict[str, Any] = {}
+    params = func.get("parameters", {})
+    for arg_name, arg_info in params.get("properties", {}).items():
+        arg_specs[arg_name] = {
+            "type": arg_info.get("type", "any"),
+            "description": arg_info.get("description", ""),
+        }
+
+    return {
+        "name": func.get("name", ""),
+        "description": func.get("description", ""),
+        "args": arg_specs,
+        "returns": func.get("returns", {}).get("description", ""),
+        "examples": [],  # CRM schema does not provide examples
+    }
 
 
 class CRMArenaTextEnv(MultiTurnEnv):
@@ -65,7 +100,12 @@ class CRMArenaTextEnv(MultiTurnEnv):
         # ------------------------------------------------------------------
         # 4. Build system prompt (textual schemas for non-native tool calls)
         # ------------------------------------------------------------------
-        tool_descriptions = self._crm_env.format_tool_descriptions(self._crm_env.tool_schemas)  # type: ignore[attr-defined]
+        # CRM ToolEnv exposes ``tools_info`` (list of function-call schemas). We
+        # convert each schema to the flattened format expected by Verifiers and
+        # then feed it to the shared formatter.
+
+        tool_schemas = [_convert_crm_schema(s) for s in self._crm_env.tools_info]
+        tool_descriptions = format_tool_descriptions(tool_schemas)
         formatted_prompt = DEFAULT_TOOL_PROMPT_TEMPLATE.format(tool_descriptions=tool_descriptions)
 
         super().__init__(

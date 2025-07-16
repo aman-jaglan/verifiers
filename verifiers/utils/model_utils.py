@@ -74,11 +74,33 @@ def get_model(model_name: str, use_liger: bool = True, model_kwargs: Union[Dict[
         return AutoModelForCausalLM.from_pretrained(model_name, **model_kwargs)
     
 def get_tokenizer(model_name: str) -> Any:
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
-    if not hasattr(tokenizer, "chat_template"):
-        raise ValueError(f"Tokenizer for model {model_name} does not have chat_template attribute, \
-                            and could not find a tokenizer with the same name as the model with suffix \
-                            '-Instruct'. Please provide a tokenizer with the chat_template attribute.")
+    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+
+    # Ensure a non-empty chat template is available. Some base checkpoints expose the attribute
+    # but leave it empty; the Trainer relies on a valid template for apply_chat_template.
+    template_attr = getattr(tokenizer, "chat_template", None)
+    if template_attr is None or template_attr.strip() == "":
+        # Heuristic: try the corresponding "-Instruct" checkpoint which usually ships the template.
+        instruct_name = None
+        if not model_name.endswith("-Instruct"):
+            instruct_name = model_name + "-Instruct" if not model_name.endswith("/") else model_name.rstrip("/") + "-Instruct"
+
+        if instruct_name is not None:
+            try:
+                instruct_tok = AutoTokenizer.from_pretrained(instruct_name, trust_remote_code=True)
+                if getattr(instruct_tok, "chat_template", None):
+                    tokenizer.chat_template = instruct_tok.chat_template  # type: ignore[attr-defined]
+            except Exception:
+                # Could not fetch instruct variant – fall through to error below
+                pass
+
+    # Final check
+    if getattr(tokenizer, "chat_template", None) is None or tokenizer.chat_template.strip() == "":  # type: ignore[attr-defined]
+        raise ValueError(
+            f"Tokenizer for model '{model_name}' lacks a usable chat_template. Specify a tokenizer that defines one "
+            "or manually set tokenizer.chat_template before training."
+        )
+
     return tokenizer
             
 def get_model_and_tokenizer(model_name: str, use_liger: bool = True, model_kwargs: Union[Dict[str, Any], None] = None) -> Tuple[Any, Any]:

@@ -29,4 +29,4 @@ for _name in [
     except ModuleNotFoundError:
         pass
 
-del _import_module, _sys, _Path, _this_dir, _name 
+del import_module, _sys, _Path, _this_dir, _name 

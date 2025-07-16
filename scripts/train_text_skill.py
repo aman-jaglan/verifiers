@@ -21,10 +21,12 @@ import yaml
 from accelerate import Accelerator
 from datasets import Dataset, load_dataset, concatenate_datasets
 from peft import LoraConfig
+from transformers import TrainingArguments
 
 from verifiers.trainers import GRPOConfig, GRPOTrainer  # direct import avoids __init__ gate
 from verifiers.envs.crmarena_text_env import CRMArenaTextEnv
 from verifiers.utils.model_utils import get_model_and_tokenizer
+from transformers import BitsAndBytesConfig
 
 # Categories and dataset loading logic must replicate the splitter exactly so
 # that saved indices align with row positions.
@@ -95,19 +97,63 @@ def main() -> None:  # noqa: D401
     # Build task mapping expected by CRMArenaTextEnv (index -> full task dict)
     tasks_by_idx = {i: base_ds[i] for i in range(len(base_ds))}
 
-    env = CRMArenaTextEnv(tasks=tasks_by_idx, max_turns=10)
+    env = CRMArenaTextEnv(tasks=tasks_by_idx, max_turns=10, eval_dataset=dataset_val)
 
     # ----------------- model & tokenizer ------------------------------
     model_name = "meta-llama/Meta-Llama-3.1-70B"
-    model, tokenizer = get_model_and_tokenizer(model_name)
+
+    # Quantise base weights to 8-bit to fit on 80-GB GPUs
+    quant_cfg = BitsAndBytesConfig(
+        load_in_4bit=True,
+        bnb_4bit_compute_dtype=torch.bfloat16,
+        bnb_4bit_use_double_quant=True,
+        bnb_4bit_quant_type="nf4",
+    )
+    model_kwargs = dict(
+        quantization_config=quant_cfg,
+        device_map="auto",  # let Transformers split layers across GPUs
+        attn_implementation="flash_attention_2",
+        use_cache=False,
+    )
+
+    model, tokenizer = get_model_and_tokenizer(
+        model_name,
+        use_liger=False,          # keep 8-bit path
+        model_kwargs=model_kwargs,
+    )
 
     # ----------------- config ----------------------------------------
     with args.config_yaml.open() as fp:
-        cfg_dict = yaml.safe_load(fp)
-    grpo_cfg = GRPOConfig(output_dir=str(args.output_dir), **cfg_dict)
+        cfg_dict_raw = yaml.safe_load(fp)
+
+    # Extract and remove keys that GRPOConfig (TrainingArguments) does not accept
+    model_yaml_name = cfg_dict_raw.pop("model_name", None)  # already used above
+    cfg_dict_raw.pop("trust_remote_code", None)
+
+    # Pop PEFT section but keep for LoRA config
+    peft_section = cfg_dict_raw.pop("peft", {})
+
+    # Map legacy/typo keys to TrainingArguments compatible names
+    if "evaluation_strategy" in cfg_dict_raw:
+        cfg_dict_raw["eval_strategy"] = cfg_dict_raw.pop("evaluation_strategy")
+
+    # Remove any keys not present in TrainingArguments to avoid TypeError
+    valid_fields = set(TrainingArguments.__dataclass_fields__.keys())
+    cfg_dict_filtered = {k: v for k, v in cfg_dict_raw.items() if k in valid_fields}
+
+    # Ensure prompts are not filtered to zero examples. Default in GRPOConfig is 512,
+    # but CRMArena system prompt + tool descriptions is large. If the user did not
+    # specify a custom value in YAML, raise it to 1024.
+
+    if "max_prompt_length" not in cfg_dict_filtered:
+        cfg_dict_filtered["max_prompt_length"] = 4096  # CRMArena tool prompt is very long
+
+    grpo_cfg = GRPOConfig(output_dir=str(args.output_dir), **cfg_dict_filtered)
 
     # LoRA configuration (matches YAML params)
-    peft_cfg = LoraConfig(**cfg_dict["peft"])
+    if "lora_r" in peft_section:
+        peft_section["r"] = peft_section.pop("lora_r")
+    peft_cfg = LoraConfig(**peft_section)
 
     # ----------------- trainer ---------------------------------------
     trainer = GRPOTrainer(

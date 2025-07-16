@@ -19,15 +19,15 @@ from typing import Dict, List
 import torch
 import yaml
 from accelerate import Accelerator
-from datasets import Dataset
+from datasets import Dataset, load_dataset, concatenate_datasets
 from peft import LoraConfig
 
 from verifiers.trainers import GRPOConfig, GRPOTrainer  # direct import avoids __init__ gate
 from verifiers.envs.crmarena_text_env import CRMArenaTextEnv
 from verifiers.utils.model_utils import get_model_and_tokenizer
 
-# CRM assets
-from CRMArena.crm_sandbox.data.assets import TASKS_B2B  # type: ignore
+# Categories and dataset loading logic must replicate the splitter exactly so
+# that saved indices align with row positions.
 
 TEXT_SKILL_CATEGORIES = {
     "knowledge_qa",
@@ -37,28 +37,36 @@ TEXT_SKILL_CATEGORIES = {
     "named_entity_disambiguation",
 }
 
+HF_DATASET_NAME = "Salesforce/CRMArenaPro"
+HF_CONFIG_NAME = "CRMArenaPro"
+MAX_EXAMPLES = 500
+
 
 # ---------------------------------------------------------------------------
 # Utility helpers
 # ---------------------------------------------------------------------------
 
-def _load_tasks_by_idx() -> Dict[int, Dict]:
-    """Load B2B tasks filtered to text-skill categories keyed by `idx`."""
-    return {
-        task["idx"]: task for task in TASKS_B2B if task["task"] in TEXT_SKILL_CATEGORIES
-    }
+
+def _load_filtered_dataset() -> Dataset:
+    """Replicates the filtering + shuffling used by the split script."""
+    ds_b2b = load_dataset(HF_DATASET_NAME, HF_CONFIG_NAME, split="b2b")
+    filtered = ds_b2b.filter(lambda x: x["task"] in TEXT_SKILL_CATEGORIES)
+
+    if len(filtered) > MAX_EXAMPLES:
+        filtered = filtered.shuffle(seed=42).select(range(MAX_EXAMPLES))
+    return filtered
 
 
-def _rows_from_indices(indices: List[int], tasks_by_idx: Dict[int, Dict]) -> List[Dict]:
-    rows = []
-    for idx in indices:
-        t = tasks_by_idx[idx]
-        rows.append({
-            "question": t["query"],
-            "answer": t["answer"],
-            "task_name": t["task"],
-        })
-    return rows
+def _rows_from_indices(indices: List[int], base_ds: Dataset) -> List[Dict]:
+    subset = base_ds.select(indices)
+    return [
+        {
+            "question": q,
+            "answer": a,
+            "task_name": t,
+        }
+        for q, a, t in zip(subset["query"], subset["answer"], subset["task"])
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -72,21 +80,22 @@ def main() -> None:  # noqa: D401
     parser.add_argument("--output_dir", type=Path, required=True)
     args = parser.parse_args()
 
-    tasks_by_idx = _load_tasks_by_idx()
+    # Load dataset and filter
+    base_ds = _load_filtered_dataset()
 
     with args.indices_json.open() as fp:
         idx_dict = json.load(fp)
 
-    rows_train = _rows_from_indices(idx_dict["train"], tasks_by_idx)
-    rows_val = _rows_from_indices(idx_dict["val"], tasks_by_idx)
+    rows_train = _rows_from_indices(idx_dict["train"], base_ds)
+    rows_val = _rows_from_indices(idx_dict["val"], base_ds)
 
-    # Build Environment (train dataset; val dataset provided separately)
     dataset_train = Dataset.from_list(rows_train)
     dataset_val = Dataset.from_list(rows_val)
+
+    # Build task mapping expected by CRMArenaTextEnv (index -> full task dict)
+    tasks_by_idx = {i: base_ds[i] for i in range(len(base_ds))}
+
     env = CRMArenaTextEnv(tasks=tasks_by_idx, max_turns=10)
-    # Override datasets prepared in __init__
-    env.dataset = dataset_train
-    env.eval_dataset = dataset_val
 
     # ----------------- model & tokenizer ------------------------------
     model_name = "meta-llama/Meta-Llama-3.1-70B"

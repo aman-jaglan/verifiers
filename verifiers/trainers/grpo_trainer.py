@@ -549,6 +549,20 @@ class GRPOTrainer(Trainer):
             generation_timeout=args.async_generation_timeout,
         )
 
+    # ------------------------------------------------------------------
+    # HuggingFace Trainer tries to move the model to `args.device` during
+    # its constructor. For tensor-parallel (`tp_plan="auto"`) models, the
+    # weights are already sharded across all GPUs; moving them to a single
+    # device would replicate the full 70 B parameters and trigger CUDA OOM.
+    # Overriding this method with a no-op prevents that extra copy while
+    # keeping tied-weight logic untouched (tied weights are handled when the
+    # sharded model is built).
+    # ------------------------------------------------------------------
+
+    def _move_model_to_device(self, model, device):  # noqa: D401, ANN001
+        """Skip moving the model – it's already placed correctly."""
+        return
+
     def get_train_dataloader(self):
         if self.train_dataset is None:
             raise ValueError("Trainer: training requires a train_dataset.")

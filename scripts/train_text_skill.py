@@ -26,7 +26,6 @@ from transformers import TrainingArguments
 from verifiers.trainers import GRPOConfig, GRPOTrainer  # direct import avoids __init__ gate
 from verifiers.envs.crmarena_text_env import CRMArenaTextEnv
 from verifiers.utils.model_utils import get_model_and_tokenizer
-from transformers import BitsAndBytesConfig
 
 # Categories and dataset loading logic must replicate the splitter exactly so
 # that saved indices align with row positions.
@@ -102,23 +101,23 @@ def main() -> None:  # noqa: D401
     # ----------------- model & tokenizer ------------------------------
     model_name = "meta-llama/Meta-Llama-3.1-70B"
 
-    # Quantise base weights to 8-bit to fit on 80-GB GPUs
-    quant_cfg = BitsAndBytesConfig(
-        load_in_4bit=True,
-        bnb_4bit_compute_dtype=torch.bfloat16,
-        bnb_4bit_use_double_quant=True,
-        bnb_4bit_quant_type="nf4",
-    )
+    # Load base model in bfloat16 and enable HuggingFace tensor-parallelism so the
+    # 70B parameters are sharded across the four H100-80 GB GPUs. This provides
+    # higher throughput than 4-bit QLoRA while still fitting comfortably in
+    # memory. BitsAndBytes quantisation is removed to avoid incompatibility with
+    # DTensor weights and to leverage H100 BF16 tensor cores fully.
+
     model_kwargs = dict(
-        quantization_config=quant_cfg,
-        device_map="auto",  # let Transformers split layers across GPUs
+        torch_dtype=torch.bfloat16,
         attn_implementation="flash_attention_2",
         use_cache=False,
+        # Let `from_pretrained` decide tp_plan="auto" (default) – this activates
+        # HF tensor-parallel and distributes layers across ranks.
     )
 
     model, tokenizer = get_model_and_tokenizer(
         model_name,
-        use_liger=False,          # keep 8-bit path
+        use_liger=True,           # leverage Liger kernel for faster Flash-Attn if available
         model_kwargs=model_kwargs,
     )
 

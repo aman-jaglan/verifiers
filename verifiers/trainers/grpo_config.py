@@ -166,6 +166,17 @@ class GRPOConfig(TrainingArguments):
         default=1024,
         metadata={"help": "Maximum number of concurrent requests to the environment."},
     )
+
+    # How often (in optimiser steps) to push updated policy weights to vLLM.
+    # 1  – sync every step (previous behaviour)
+    # N>1 – sync every N steps, reducing GPU idle time during weight uploads.
+    weight_sync_steps: int = field(
+        default=10,
+        metadata={
+            "help": "Synchronise the policy weights with the vLLM server only every N optimiser steps."
+        },
+    )
+
     # Async generation parameters
     num_batches_ahead: int = field(
         default=1,

@@ -211,22 +211,30 @@ class AsyncBatchGenerator:
         asyncio.set_event_loop(loop)
         self.worker_loop = loop  # Store the event loop reference
 
-        # Create the AsyncOpenAI client within this event loop
-        import httpx
-        from openai import AsyncOpenAI
+        # If a client has already been injected (e.g. a custom TRLVLLMClient
+        # wrapper that mimics the OpenAI SDK), reuse it. Otherwise, fall back
+        # to constructing an AsyncOpenAI client using the provided
+        # configuration. This avoids KeyError when `http_client_args` is not
+        # present and allows external callers to supply their own
+        # implementation.
 
-        self.client = AsyncOpenAI(
-            base_url=self.client_config["base_url"],
-            api_key=self.client_config["api_key"],
-            http_client=httpx.AsyncClient(
-                limits=httpx.Limits(
-                    max_connections=self.client_config["http_client_args"]["limits"][
-                        "max_connections"
-                    ]
+        if self.client is None:
+            import httpx
+            from openai import AsyncOpenAI
+
+            http_client_args = self.client_config.get("http_client_args", {})
+            limits_cfg = http_client_args.get("limits", {})
+
+            self.client = AsyncOpenAI(
+                base_url=self.client_config["base_url"],
+                api_key=self.client_config.get("api_key", ""),
+                http_client=httpx.AsyncClient(
+                    limits=httpx.Limits(
+                        max_connections=limits_cfg.get("max_connections", 100)
+                    ),
+                    timeout=http_client_args.get("timeout", None),
                 ),
-                timeout=self.client_config["http_client_args"]["timeout"],
-            ),
-        )
+            )
 
         try:
             while not self.stop_event.is_set():
@@ -236,12 +244,24 @@ class AsyncBatchGenerator:
                     if request is None:  # Poison pill
                         break
 
+                    self.logger.info(
+                        "[Worker] ↪️  Starting generation for batch %s (max_conc=%s)",
+                        request.batch_id,
+                        request.max_concurrent,
+                    )
+
                     # Generate batch using the async method
                     start_time = time.time()
                     result = loop.run_until_complete(
                         self._generate_batch_async(request)
                     )
                     generation_time = time.time() - start_time
+                    self.logger.info(
+                        "[Worker] ✅ Finished batch %s in %.1fs (prompt_count=%d)",
+                        request.batch_id,
+                        generation_time,
+                        len(result.processed_results.get("prompt_ids", [])),
+                    )
                     result.generation_time = generation_time
                     self.generation_times.append(generation_time)
                     self.result_queue.put(result)
@@ -251,8 +271,8 @@ class AsyncBatchGenerator:
                     self.logger.error(f"Error in generation worker: {e}")
                     raise e
         finally:
-            # Clean up the client
-            if self.client:
+            # Clean up the client if it exposes an async `close()` method (e.g. AsyncOpenAI)
+            if self.client and hasattr(self.client, "close"):
                 loop.run_until_complete(self.client.close())
             # Clean up the event loop
             loop.close()
@@ -262,8 +282,54 @@ class AsyncBatchGenerator:
         """
         Generate a single batch asynchronously.
         """
-        # Call environment generation
-        self.is_generating = True
+        # ------------------------------------------------------------------
+        # Safety-net: ensure no prompt exceeds the model context limit. The
+        # vLLM engine aborts when len(tokens) > 8 192. We conservatively trim
+        # prompts to 8 000 tokens, removing the *oldest* user/assistant turns
+        # (but never the system message) until the length fits.  This prevents
+        # sporadic ValueError crashes in early roll-outs.
+        # ------------------------------------------------------------------
+
+        tokenizer = request.processing_class  # Shorthand
+        MAX_CTX = 8192
+        TARGET = 8000  # leave head-room for generated reply
+
+        def _truncate_chat(chat_prompt):  # type: ignore
+            """Return a chat prompt list trimmed to TARGET tokens."""
+            if not isinstance(chat_prompt, list):
+                return chat_prompt
+            # Keep first message (often the system prompt)
+            kept = chat_prompt[:]
+            while True:
+                token_len = len(
+                    tokenizer.apply_chat_template(kept, tokenize=True)  # type: ignore
+                )
+                if token_len <= TARGET:
+                    return kept
+                # Remove second message (index 1). We always keep index 0.
+                if len(kept) > 1:
+                    kept.pop(1)
+                else:
+                    return kept  # cannot truncate further
+
+        def _truncate_completion(text_prompt):
+            if not isinstance(text_prompt, str):
+                return text_prompt
+            ids = tokenizer.encode(text_prompt)  # type: ignore
+            if len(ids) <= TARGET:
+                return text_prompt
+            # Keep last TARGET tokens
+            trimmed_ids = ids[-TARGET:]
+            return tokenizer.decode(trimmed_ids)  # type: ignore
+
+        env_inputs = request.env_inputs
+        prompts = env_inputs["prompt"]
+        env_inputs["prompt"] = [
+            _truncate_chat(p) if isinstance(p, list) else _truncate_completion(p)
+            for p in prompts
+        ]
+
+        self.logger.info("[Batch %s] 🚀 env.a_generate()", request.batch_id)
         env_results = await self.env.a_generate(
             request.env_inputs,
             client=self.client,
@@ -272,7 +338,7 @@ class AsyncBatchGenerator:
             score_rollouts=True,
             max_concurrent=request.max_concurrent,
         )
-        self.is_generating = False
+        self.logger.info("[Batch %s] 🎯 env.a_generate() returned", request.batch_id)
 
         # Extract all reward-related keys
         all_reward_dict = {}
@@ -343,22 +409,29 @@ class AsyncBatchGenerator:
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
 
-            # Create a new client for this evaluation
-            import httpx
-            from openai import AsyncOpenAI
+            # Reuse the existing client if one is already set (e.g. a custom
+            # TRLVLLMClient wrapper). Otherwise, construct a temporary
+            # AsyncOpenAI client using any provided http_client_args.
 
-            eval_client = AsyncOpenAI(
-                base_url=self.client_config["base_url"],
-                api_key=self.client_config["api_key"],
-                http_client=httpx.AsyncClient(
-                    limits=httpx.Limits(
-                        max_connections=self.client_config["http_client_args"][
-                            "limits"
-                        ]["max_connections"]
+            if self.client is not None:
+                eval_client = self.client
+            else:
+                import httpx
+                from openai import AsyncOpenAI
+
+                http_client_args = self.client_config.get("http_client_args", {})
+                limits_cfg = http_client_args.get("limits", {})
+
+                eval_client = AsyncOpenAI(
+                    base_url=self.client_config["base_url"],
+                    api_key=self.client_config.get("api_key", ""),
+                    http_client=httpx.AsyncClient(
+                        limits=httpx.Limits(
+                            max_connections=limits_cfg.get("max_connections", 100)
+                        ),
+                        timeout=http_client_args.get("timeout", None),
                     ),
-                    timeout=self.client_config["http_client_args"]["timeout"],
-                ),
-            )
+                )
 
             async def run_eval():
                 try:
@@ -384,7 +457,8 @@ class AsyncBatchGenerator:
                 except Exception as e:
                     exception_container.append(e)
                 finally:
-                    await eval_client.close()
+                    if hasattr(eval_client, "close"):
+                        await eval_client.close()
 
             try:
                 loop.run_until_complete(run_eval())

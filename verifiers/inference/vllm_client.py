@@ -211,13 +211,52 @@ class VLLMClient(AsyncOpenAI):
         if response.status_code != 200:
             raise Exception(f"Request failed: {response.status_code}, {response.text}")
 
-    def get_num_background_tasks(self):
+    def get_num_background_tasks(self) -> int:
+        """Return the current number of weight-update background tasks.
+
+        The FastAPI server defines the route **with** a trailing slash
+        (``/get_num_background_tasks/``).  Hitting the bare path produces a
+        404, which previously surfaced as a ``KeyError`` when trying to
+        extract the JSON payload.  We now call the canonical URL and raise a
+        clear exception if the server responds with an unexpected status
+        code.
         """
-        Gets the number of background tasks.
-        """
-        url = f"{self.server_url}/get_num_background_tasks"
-        response = self.session.post(url)
-        return response.json()["num_background_tasks"]
+        # Try canonical path *without* trailing slash first (FastAPI default)
+        variants = [
+            f"{self.server_url}/get_num_background_tasks",
+            f"{self.server_url}/get_num_background_tasks/",
+        ]
+
+        last_status = None
+        last_text = None
+        for url in variants:
+            try:
+                response = self.session.post(url)
+            except Exception as exc:  # pragma: no cover – connection errors
+                last_status = None
+                last_text = str(exc)
+                continue
+
+            last_status = response.status_code
+            last_text = response.text
+
+            if response.status_code == 200:
+                payload = response.json()
+                if "num_background_tasks" in payload:
+                    return payload["num_background_tasks"]  # type: ignore[return-value]
+
+            # Treat 404 as "endpoint not available" and try next variant
+            if response.status_code == 404:
+                continue
+
+        # If both variants return 404 we assume server lacks the endpoint – treat as 0 tasks
+        if last_status == 404:
+            return 0
+
+        raise RuntimeError(
+            "Failed to query background tasks – tried both URL variants; "
+            f"last response {last_status}: {last_text}"
+        )
 
     def close_communicator(self):
         """

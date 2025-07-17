@@ -10,7 +10,7 @@ BEDROCK_MODELS_MAP = {
         "name": "meta.llama3-1-70b-instruct-v1:0",
         "region": "us-west-2",
     },
-    "llama-3.1-70b-instruct": {
+    "llama-3.1-8b-instruct": {
         "name": "meta.llama3-1-8b-instruct-v1:0",
         "region": "us-west-2",
     },
@@ -62,7 +62,10 @@ TOGETHER_MODELS_MAP = {
     },
     "deepseek-r1" : {
         "name": "together_ai/deepseek-ai/DeepSeek-R1"
-    }
+    },
+    "qwen3-14b": {
+        "name": "together_ai/Qwen/Qwen3-14B",
+    },
 }
 
 VERTEX_MODELS_MAP = {

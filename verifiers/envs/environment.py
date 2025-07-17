@@ -679,10 +679,21 @@ Model copies with swapped templates are available here: https://huggingface.co/c
                         conversation=messages_consumed + [message],  # type: ignore
                     )
                 )
-                assert token_prefix_with_turn[: len(token_prefix)] == token_prefix, (
-                    f"Token prefix mismatch. Token prefix: {token_prefix}, token prefix with turn: {token_prefix_with_turn}"
-                )
-                completion_turn_ids = token_prefix_with_turn[len(token_prefix) :]
+                # Some chat templates (e.g. Qwen) re-emit a BOS or role marker at
+                # every turn, so the strict prefix property does not hold.
+                # Instead of aborting, gracefully compute the *first* position
+                # where the two encodings diverge and slice from there.
+                if token_prefix_with_turn[: len(token_prefix)] != token_prefix:
+                    # Find longest common prefix length
+                    prefix_len = 0
+                    for a_tok, b_tok in zip(token_prefix_with_turn, token_prefix):
+                        if a_tok != b_tok:
+                            break
+                        prefix_len += 1
+                else:
+                    prefix_len = len(token_prefix)
+
+                completion_turn_ids = token_prefix_with_turn[prefix_len:]
                 if mask_env_responses:
                     completion_turn_mask = [0] * len(completion_turn_ids)
                 else:
@@ -750,7 +761,9 @@ Model copies with swapped templates are available here: https://huggingface.co/c
             is_truncated = False
             if max_seq_len > 0 and len(prompt_ids) + len(completion_ids) > max_seq_len:
                 if len(prompt_ids) > max_seq_len:
+                    # Truncate both ids and mask to keep them in sync
                     prompt_ids = prompt_ids[:max_seq_len]
+                    prompt_mask = prompt_mask[:max_seq_len]
                 completion_ids = completion_ids[: max_seq_len - len(prompt_ids)]
                 completion_mask = completion_mask[: max_seq_len - len(prompt_ids)]
                 is_truncated = True

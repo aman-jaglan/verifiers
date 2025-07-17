@@ -88,7 +88,7 @@ class ChatAgent:
             self.sys_prompt += SYSTEM_METADATA.format(system_metadata=args["metadata"]["required"], system="Salesforce instance") # add task/query-specific metadata here
         if self.eval_mode == "aided" and "optional" in args["metadata"]:
             self.sys_prompt += "\n" + args["metadata"]["optional"]
-        if self.original_model_name not in ["o1-mini", "o1-preview", "o1-2024-12-17", "deepseek-r1", "o3-mini-2025-01-31", "gemini-2.5-flash-preview-04-17"]:
+        if self.original_model_name not in ["o1-mini", "o1-preview", "o1-2024-12-17", "deepseek-r1", "o3-mini-2025-01-31", "gemini-2.5-flash-preview-04-17", "gemini-2.5-flash-preview-04-17-thinking-4096", "gemini-2.5-pro-preview-03-25"]:
             self.messages = [{"role": "system", "content": self.sys_prompt.strip()}]
             self.messages.append({"role": "user", "content": args["query"].strip()})
         
@@ -128,7 +128,13 @@ class ChatAgent:
                 messages=self.messages,
                 model=self.model,
                 temperature=0.0,
-                max_tokens=2000 if self.original_model_name not in ["o1-mini", "o1-preview", "o1-2024-12-17", "deepseek-r1", "o3-mini-2025-01-31", "gemini-2.5-flash-preview-04-17", "gemini-2.5-flash-preview-04-17-thinking-4096", "gemini-2.5-pro-preview-03-25"] else 50000,
+                max_tokens=32768 if self.original_model_name == "qwen3-14b" else (
+                    2000 if self.original_model_name not in [
+                        "o1-mini", "o1-preview", "o1-2024-12-17", "deepseek-r1", "o3-mini-2025-01-31",
+                        "gemini-2.5-flash-preview-04-17", "gemini-2.5-flash-preview-04-17-thinking-4096",
+                        "gemini-2.5-pro-preview-03-25"
+                    ] else 50000
+                ),
                 top_p=1.0 if self.model not in ["o3-mini-2025-01-31"] else None,
                 thinking= thinking,  
                 # custom_llm_provider=self.provider,

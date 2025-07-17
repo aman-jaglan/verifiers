@@ -38,3 +38,18 @@ logs/
 wip/
 old/
 notebooks/
+
+# data
+data/   
+
+environments/
+arc/
+
+# huggingface
+hf_cache/
+
+# vllm
+vllm/
+
+# vllm
+vllm/

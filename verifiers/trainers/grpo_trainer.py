@@ -29,6 +29,10 @@ from verifiers.trainers.async_batch_generator import AsyncBatchGenerator, BatchR
 from verifiers.trainers.async_dataloader_wrapper import AsyncDataLoaderWrapper
 from verifiers.trainers.grpo_config import GRPOConfig
 from verifiers.utils.logging_utils import print_prompt_completions_sample
+from verifiers.utils.model_utils import get_model_and_tokenizer
+from verifiers.inference.trl_vllm_client import TRLVLLMClient
+# Use the local enhanced client (includes get_num_background_tasks and other utilities)
+from verifiers.inference.vllm_client import VLLMClient
 
 
 class RepeatSampler(Sampler):
@@ -398,6 +402,29 @@ class GRPOTrainer(Trainer):
             optimizers=optimizers,
         )
 
+        # ------------------------------------------------------------------
+        # HuggingFace tensor-parallel converts parameters to `DTensor`s.
+        # PyTorch DDP (invoked by `accelerator.prepare(model)`) cannot wrap
+        # DTensor parameters and throws `ValueError: DTensor parameters are
+        # incompatible with DDP`.  We therefore override the accelerator’s
+        # `prepare_model` to a no-op that simply returns the model unchanged.
+        # Optimizer, dataloaders, etc. are still prepared normally.
+        # ------------------------------------------------------------------
+
+        if hasattr(self, "accelerator"):
+            def _skip_prepare_model(mod, *_, **__):  # type: ignore
+                return mod
+
+            self.accelerator.prepare_model = _skip_prepare_model  # type: ignore
+
+        # ------------------------------------------------------------------
+        # The default Accelerator created by `Trainer` performs `.to(device)`
+        # inside `prepare_model`, which tries to move an already tensor-parallel
+        # sharded model onto a single GPU, blowing up memory.  Disabling
+        # `device_placement` tells Accelerate to skip that copy and only wrap
+        # the model with its DistributedDataParallel backend.
+        # ------------------------------------------------------------------
+
         if self.train_dataset is not None:
             unique_prompts_per_device_batch = (
                 self.per_device_train_batch_size / self.num_generations
@@ -483,26 +510,39 @@ class GRPOTrainer(Trainer):
         # OpenAI client for Environment generation (using vLLM server)
         host = args.vllm_server_host
         port = args.vllm_server_port
-        vllm_base_url = f"http://{host}:{port}/v1"
+        vllm_base_url = f"http://{host}:{port}"  # TRL vllm-serve base URL (no /v1)
+        # Keep for weight-sync client; generation uses custom wrapper.
         self.client_config = {
             "base_url": vllm_base_url,
             "api_key": "EMPTY",
-            "http_client_args": {
-                "limits": {"max_connections": args.max_concurrent},
-                "timeout": args.async_generation_timeout,
-            },
         }
 
-        # vLLM client for weight syncing only; only import if used
-        from verifiers.inference.vllm_client import VLLMClient
-
+        # Instantiate the enhanced VLLM client. Note: the local implementation
+        # expects the server port via the `port` argument (not `server_port`).
         self.vllm_client = VLLMClient(
-            host=host, port=port, connection_timeout=args.vllm_server_timeout
+            host=host,
+            port=port,
+            connection_timeout=args.vllm_server_timeout,
         )
-        # Only initialize communicator on the main process
-        # Other processes will only use the client for non-NCCL operations
+
+        # Ensure we start from a clean state: close any leftover communicator on
+        # the server.  IMPORTANT when you reuse the same vLLM instance across
+        # multiple training runs—without this, the server raises
+        # "Weight update group already initialized".
         if self.accelerator.is_main_process:
+            try:
+                self.logger.info("Resetting communicator state on vLLM server …")
+                self.vllm_client.close_communicator()
+            except Exception:
+                # Ignored: server may not have an active group yet.
+                pass
+
+            self.logger.info("Initializing communicator with vLLM server …")
             self.vllm_client.init_communicator()
+
+        # Make sure all ranks wait until the communicator is ready to avoid
+        # AttributeError on non-main processes that may call weight sync later.
+        self.accelerator.wait_for_everyone()
 
         self._last_loaded_step = (
             0  # Initialize to 0 since vLLM already has initial weights
@@ -537,6 +577,8 @@ class GRPOTrainer(Trainer):
         self._next_batch_id: int = 0
         self._async_started = False
         self.num_batches_ahead = args.num_batches_ahead
+        # How often to sync policy weights with the vLLM server.
+        self.weight_sync_steps = args.weight_sync_steps
 
         # num_batches_ahead=0 will behave synchronously (submit and wait immediately)
         self.async_generator = AsyncBatchGenerator(
@@ -549,6 +591,9 @@ class GRPOTrainer(Trainer):
             generation_timeout=args.async_generation_timeout,
         )
 
+        # Replace the default OpenAI client with TRL wrapper
+        self.async_generator.client = TRLVLLMClient(vllm_base_url, tokenizer=self.processing_class)
+
     # ------------------------------------------------------------------
     # HuggingFace Trainer tries to move the model to `args.device` during
     # its constructor. For tensor-parallel (`tp_plan="auto"`) models, the
@@ -560,8 +605,26 @@ class GRPOTrainer(Trainer):
     # ------------------------------------------------------------------
 
     def _move_model_to_device(self, model, device):  # noqa: D401, ANN001
-        """Skip moving the model – it's already placed correctly."""
-        return
+        """Move the model to *device* unless it is already there.
+
+        We bypassed the default behaviour to avoid duplicating parameters when
+        the base model was tensor-parallel sharded (`device_map="auto"`).  After
+        switching to `device_map=None` every rank now holds a full copy of the
+        8 B model on **its own** GPU, so the weights initially load on CPU and
+        must be transferred to the correct CUDA device.  Failing to do so leads
+        to shape- or device-mismatch errors at the first forward pass.
+        """
+
+        # Check the first parameter; if it is already on the target device we
+        # can safely skip.
+        first_param = next(model.parameters(), None)
+        if first_param is not None and first_param.device == device:
+            return
+
+        # Otherwise move the whole module tree.  We cannot call the parent
+        # class’ implementation directly because it uses private helpers, so a
+        # plain `.to(device)` is safer and sufficient here.
+        model.to(device)
 
     def get_train_dataloader(self):
         if self.train_dataset is None:
@@ -844,7 +907,7 @@ class GRPOTrainer(Trainer):
         device: torch.device,
     ) -> Dict[str, torch.Tensor]:
         ids = [prompt_ids[i] + completion_ids[i] for i in range(len(prompt_ids))]
-        mask = [prompt_mask[i] + completion_mask[i] for i in range(len(prompt_mask))]
+        mask = [prompt_mask[i] + completion_mask[i] for i in range(len(mask))]
         max_len = max(len(ids[i]) for i in range(len(ids)))
         ids = [
             torch.cat(
@@ -924,8 +987,8 @@ class GRPOTrainer(Trainer):
 
         # Check if we need to generate new completions
         if self._step % generate_every == 0 or self._buffered_inputs is None:
-            # Update weights to vLLM if needed
-            if self.state.global_step > self._last_loaded_step:
+            # Update weights to vLLM if required by weight_sync_steps
+            if (self.state.global_step - self._last_loaded_step) >= self.weight_sync_steps:
                 self.logger.info(
                     f"Syncing weights to vLLM at step {self.state.global_step}"
                 )
@@ -1263,7 +1326,34 @@ class GRPOTrainer(Trainer):
         self._metrics[mode]["clip_ratio/region_mean"].append(
             gathered_clip_ratio.nanmean().item()
         )  # type: ignore
+
+        # ------------------------------------------------------------------
+        # Capture scalar loss for logging (will be injected in self.log()).
+        # We detach to avoid keeping the graph alive.
+        # ------------------------------------------------------------------
+        self._latest_loss = loss.detach().float().item()
         return loss
+
+    # ====================================================================== #
+    #  Hooks to measure gradient-norm right before the optimiser update.
+    #  The Trainer base class will call this on every optimisation step.
+    # ====================================================================== #
+    def on_before_optimizer_step(self, args, state, control, **kwargs):  # noqa: D401, ANN001
+        """Compute total grad-norm so it can be logged alongside rewards."""
+        total_norm = None
+        try:
+            # Compute 2-norm of all gradients that are not None.
+            parameters = [p for p in self.model.parameters() if p.grad is not None]  # type: ignore[arg-type]
+            if parameters:
+                total_norm = torch.linalg.vector_norm(
+                    torch.stack([p.grad.detach().float().norm(2) for p in parameters]),
+                    2,
+                ).item()
+        except Exception:  # fallback – do not crash training if something goes wrong
+            total_norm = None
+
+        self._latest_grad_norm = total_norm
+
 
     def evaluate(
         self, eval_dataset=None, ignore_keys=None, metric_key_prefix="eval", **kwargs
@@ -1431,6 +1521,15 @@ class GRPOTrainer(Trainer):
             self._textual_logs["completion"].clear()
             for key in self._textual_logs["rewards"]:
                 self._textual_logs["rewards"][key].clear()
+
+        # ------------------------------------------------------------------
+        # Inject latest loss / grad-norm if they weren't part of *logs*.
+        # This ensures W&B plots show true optimisation metrics.
+        # ------------------------------------------------------------------
+        if "loss" not in logs and hasattr(self, "_latest_loss") and self._latest_loss is not None:
+            logs["loss"] = self._latest_loss  # type: ignore[attr-defined]
+        if "grad_norm" not in logs and hasattr(self, "_latest_grad_norm") and self._latest_grad_norm is not None:
+            logs["grad_norm"] = self._latest_grad_norm  # type: ignore[attr-defined]
 
     def _log_reward_metrics_primary(
         self,

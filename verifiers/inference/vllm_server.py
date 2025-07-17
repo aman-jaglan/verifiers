@@ -31,6 +31,18 @@ from vllm.entrypoints.launcher import serve_http
 from vllm.utils import set_ulimit
 from vllm.usage.usage_lib import UsageContext
 
+import logging
+# ---------------------------------------------------------------------------
+# Ensure our diagnostic logger (and any child loggers) actually print.  Uvicorn
+# only configures loggers that **it** owns, so we need to set up the root
+# logger ourselves before registering middleware.
+# ---------------------------------------------------------------------------
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+)
+
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
 # Weight update throttling
@@ -128,6 +140,36 @@ async def run_server(args: Namespace):
     engine_args.worker_extension_cls = "verifiers.inference.vllm_server.WeightSyncWorkerExtension"
     engine = AsyncLLMEngine.from_engine_args(engine_args, usage_context=UsageContext.OPENAI_API_SERVER)
     app = build_app(args)
+
+    # ------------------------------------------------------------------
+    # Diagnostic middleware – logs every /generate request so we can see
+    # prompt lengths and correlate stalls with overly long inputs.  The
+    # check is lightweight (does not tokenise) yet good enough to flag
+    # suspiciously large prompts that would exceed Llama-3’s 8 192-token
+    # limit.  It also logs the current number of outstanding weight-update
+    # tasks so we can confirm whether generation is blocked waiting for
+    # queued tensor broadcasts to finish.
+    # ------------------------------------------------------------------
+
+    @app.middleware("http")  # type: ignore
+    async def log_generate_requests(request: Request, call_next):  # noqa: D401
+        if request.url.path.rstrip("/") == "/generate":
+            try:
+                payload = await request.json()
+                prompts = payload.get("prompts", [])
+                lengths = [len(p.split()) if isinstance(p, str) else 0 for p in prompts]
+                max_len = max(lengths) if lengths else 0
+                logger.info(
+                    "[diag] /generate received %d prompts – max_len=%d, bg_weight_updates=%d",
+                    len(prompts),
+                    max_len,
+                    len(background_tasks),
+                )
+            except Exception as exc:  # pragma: no cover – debug path only
+                logger.warning("[diag] failed to inspect /generate payload: %s", exc)
+
+        response = await call_next(request)
+        return response
 
     @app.get("/health")
     async def health():

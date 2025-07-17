@@ -23,7 +23,13 @@ def chat_completion_request(
         model=model,
         temperature=0.0,
         top_p=1.0,
-        max_tokens=3500 if model not in ["o1-mini", "o1-preview", "o1-2024-12-17", "deepseek-r1", "o3-mini-2025-01-31", "gemini-2.5-flash-preview-04-17", "gemini-2.5-flash-preview-04-17-thinking-4096", "gemini-2.5-pro-preview-03-25"] else 50000,
+        max_tokens=32768 if model.endswith("Qwen3-14B") or model == "qwen3-14b" else (
+            3500 if model not in [
+                "o1-mini", "o1-preview", "o1-2024-12-17", "deepseek-r1", "o3-mini-2025-01-31",
+                "gemini-2.5-flash-preview-04-17", "gemini-2.5-flash-preview-04-17-thinking-4096",
+                "gemini-2.5-pro-preview-03-25"
+            ] else 50000
+        ),
         tools=tools if "llama" not in model else None, ## llama tool_calling through prompt
         additional_drop_params=["temperature", "top_p"] if model in ["o1-mini", "o1-preview", "o1-2024-12-17"] else []
     )

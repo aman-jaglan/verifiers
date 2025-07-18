@@ -21,7 +21,7 @@ max_steps: -1                         # use epochs
 max_prompt_length: 8000
 
 # ---- logging & evaluation --------------------------------------------------
-logging_steps: 50
+logging_steps: 5
 log_completions: true
 num_completions_to_print: 4 
 save_steps: 50                       # save model checkpoint every 50 steps

@@ -31,7 +31,7 @@ from crm_sandbox.env.functions import (
 )
 
 from verifiers.envs.crmarena_env import CRMArenaEnv
-from verifiers.parsers import XMLParser
+from verifiers import XMLParser
 from verifiers.rubrics import ToolRubric
 
 # ---------------------------------------------------------------------------

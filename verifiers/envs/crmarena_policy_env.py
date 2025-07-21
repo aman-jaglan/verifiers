@@ -35,21 +35,38 @@ from ..parsers.xml_parser import XMLParser
 from verifiers.envs.tool_env import format_tool_descriptions  # human-readable schemas
 from verifiers.prompts import DEFAULT_TOOL_PROMPT_TEMPLATE
 
+import inspect
+import crm_sandbox.env.functions as crm_fn_mod
+
 __all__ = [
     "CRMArenaPolicyEnv",
     "POLICY_TOOLS",
+    "ALL_CRM_TOOLS",
 ]
 
 # ---------------------------------------------------------------------------
-# Tool subset
+# Collect every CRM helper that declares an OpenAI-style JSON schema via
+# the ``__info__`` attribute.  This ensures the policy is aware of *all*
+# available tools during training without having to maintain a manual list.
 # ---------------------------------------------------------------------------
-POLICY_TOOLS: List[Callable] = [
-    search_knowledge_articles,
-    search_products,
-    get_issues,
-    get_issue_counts,
-    respond,
-]
+
+def _collect_all_tools() -> list[Callable]:
+    """Return every callable in ``crm_sandbox.env.functions`` that defines
+    a JSON schema ("__info__" attribute)."""
+
+    return [
+        fn
+        for _, fn in inspect.getmembers(crm_fn_mod, inspect.isfunction)
+        if hasattr(fn, "__info__")
+    ]
+
+
+# Full exhaustive set of CRM tools
+ALL_CRM_TOOLS: list[Callable] = _collect_all_tools()
+
+# Back-compatibility alias used by external scripts (e.g. train_text_skill.py)
+# Previously this contained a five-tool subset; it now points to the full set.
+POLICY_TOOLS: list[Callable] = ALL_CRM_TOOLS
 
 # ---------------------------------------------------------------------------
 # Helper to convert CRMArena function-call schema to Verifiers flat schema

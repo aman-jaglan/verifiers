@@ -66,6 +66,24 @@ class CRMArenaPolicyEnv(CRMArenaEnv):
 
         super().__init__(tasks=tasks, tools=tools, task_index=task_index, **kwargs)
 
+        # ---------------------------------------------------------------
+        # Instrument litellm.completion so we can count GPT-4o calls.
+        # This is *local* to the environment instance and does not affect
+        # other parts of the application.
+        # ---------------------------------------------------------------
+        import litellm  # import inside to avoid hard dep at module import time
+
+        self._gpt_calls = 0
+
+        _orig_completion = litellm.completion
+
+        def _counting_completion(*args, **kw):  # type: ignore[override]
+            self._gpt_calls += 1
+            return _orig_completion(*args, **kw)
+
+        litellm.completion = _counting_completion  # type: ignore[assignment]
+        self._restore_litellm = lambda: setattr(litellm, "completion", _orig_completion)
+
         # Build rubric for auxiliary rewards
         self._parser = XMLParser(fields=["think", ("tool", "answer")], answer_field="answer")
         self._env_parser = XMLParser(fields=["result"])
@@ -96,7 +114,18 @@ class CRMArenaPolicyEnv(CRMArenaEnv):
                 "tool_success": tool_score,
                 "format": fmt_score,
             }
+
+            # expose how many GPT-4o (litellm) calls were made in this episode
+            info["gpt4o_calls"] = self._gpt_calls
+            # reset counter for next episode
+            self._gpt_calls = 0
         else:
             final_reward = 0.0
 
-        return observation, final_reward, done, info 
+        return observation, final_reward, done, info
+
+    # ------------------------------------------------------------------ #
+    def __del__(self):
+        """Restore litellm.completion on garbage-collection."""
+        if hasattr(self, "_restore_litellm"):
+            self._restore_litellm() 

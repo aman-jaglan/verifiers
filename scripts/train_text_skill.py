@@ -66,8 +66,8 @@ from verifiers.utils.model_utils import get_model_and_tokenizer
 # that saved indices align with row positions.
 
 POLICY_TASKS = {
-    "invalid_configuration_identification",
-    "solution_violation_identification",
+    "invalid_config",
+    "policy_violation_identification",
     "lead_qualification",
     "quote_approval",
 }

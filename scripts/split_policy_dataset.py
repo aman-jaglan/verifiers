@@ -37,8 +37,8 @@ from typing import Dict, List
 from datasets import Dataset, load_dataset
 
 POLICY_TASKS = {
-    "invalid_configuration_identification",
-    "solution_violation_identification",
+    "invalid_config",
+    "policy_violation_identification",
     "lead_qualification",
     "quote_approval",
 }

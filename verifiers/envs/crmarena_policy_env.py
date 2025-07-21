@@ -64,7 +64,12 @@ class CRMArenaPolicyEnv(CRMArenaEnv):
         if tools is None:
             tools = POLICY_TOOLS
 
-        super().__init__(tasks=tasks, tools=tools, task_index=task_index, **kwargs)
+        # Accept-but-ignore arguments that the CRMArenaEnv base class does not support
+        self._max_turns = kwargs.pop("max_turns", None)
+        self._dataset: Any | None = kwargs.pop("dataset", None)
+        self._eval_dataset: Any | None = kwargs.pop("eval_dataset", None)
+
+        super().__init__(tasks=tasks, tools=tools, task_index=task_index)
 
         # ---------------------------------------------------------------
         # Instrument litellm.completion so we can count GPT-4o calls.
@@ -123,6 +128,13 @@ class CRMArenaPolicyEnv(CRMArenaEnv):
             final_reward = 0.0
 
         return observation, final_reward, done, info
+
+    # -------------- optional dataset helpers for trainers --------------- #
+    def get_dataset(self):  # noqa: D401
+        return self._dataset
+
+    def get_eval_dataset(self):  # noqa: D401
+        return self._eval_dataset
 
     # ------------------------------------------------------------------ #
     def __del__(self):

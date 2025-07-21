@@ -4,11 +4,10 @@ from typing import Tuple
 
 from openai import AsyncOpenAI
 
-from verifiers import (
+from ..types import (
     ChatCompletion,
     ChatMessage,
     Completion,
-    Environment,
     Info,
     Message,
     Messages,
@@ -16,6 +15,8 @@ from verifiers import (
     SamplingArgs,
     State,
 )
+
+from .environment import Environment
 
 class MultiTurnEnv(Environment):
     def __init__(self,

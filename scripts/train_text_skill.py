@@ -134,6 +134,7 @@ def main() -> None:  # noqa: D401
         tasks=tasks_by_idx,
         tools=POLICY_TOOLS,
         max_turns=5,
+        dataset=dataset_train,           # provide training subset for GRPOTrainer
         eval_dataset=dataset_val,
     )
 

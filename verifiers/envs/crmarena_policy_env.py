@@ -6,22 +6,20 @@ Environment wrapper for the four *policy* tasks that keeps CRMArena’s
 GPT-4o-based exact-match scoring **and** augments it with Verifiers’ tool
 execution / format rewards.
 
-Compared to :class:`verifiers.envs.crmarena_env.CRMArenaEnv` it
+It mirrors the structure of :class:`verifiers.envs.crmarena_text_env.CRMArenaTextEnv`
+but narrows the helper-function set to the subset actually used by the policy
+benchmarks and overrides the reward weights as requested by the user:
 
-* limits the helper-function set to the five actually used by the policy
-  tasks (search_knowledge_articles, search_products, get_issues,
-  get_issue_counts, respond) to shrink the action space;
-* computes additional rewards via :class:`verifiers.rubrics.ToolRubric` on
-  episode termination and returns the weighted sum.
-
-Reward weights follow the user specification:
-  answer-correctness  …… 1.0  (CRM evaluator)
-  tool-success        …… 0.1
-  format (XML)        …… 0.0
+    answer-correctness … 1.0 (CRM evaluator)
+    tool-success       … 0.1
+    format (XML)       … 0.0
 """
 
-from typing import Any, Dict, List, Tuple, Callable
+from typing import Any, Dict, List, Callable, Tuple, Optional
 
+from datasets import Dataset
+
+# CRM sandbox imports -------------------------------------------------------
 from crm_sandbox.env.functions import (
     search_knowledge_articles,
     search_products,
@@ -29,13 +27,21 @@ from crm_sandbox.env.functions import (
     get_issue_counts,
     respond,
 )
+from crm_sandbox.env.env import ToolEnv as CRMSandboxToolEnv  # type: ignore
 
-from verifiers.envs.crmarena_env import CRMArenaEnv
-from verifiers import XMLParser
-from verifiers import ToolRubric
+from .multiturn_env import MultiTurnEnv
+from ..rubrics.tool_rubric import ToolRubric
+from ..parsers.xml_parser import XMLParser
+from verifiers.envs.tool_env import format_tool_descriptions  # human-readable schemas
+from verifiers.prompts import DEFAULT_TOOL_PROMPT_TEMPLATE
+
+__all__ = [
+    "CRMArenaPolicyEnv",
+    "POLICY_TOOLS",
+]
 
 # ---------------------------------------------------------------------------
-# Helper: narrow tool list to policy-relevant subset
+# Tool subset
 # ---------------------------------------------------------------------------
 POLICY_TOOLS: List[Callable] = [
     search_knowledge_articles,
@@ -45,18 +51,52 @@ POLICY_TOOLS: List[Callable] = [
     respond,
 ]
 
-__all__ = ["CRMArenaPolicyEnv", "POLICY_TOOLS"]
+# ---------------------------------------------------------------------------
+# Helper to convert CRMArena function-call schema to Verifiers flat schema
+# ---------------------------------------------------------------------------
+
+def _convert_crm_schema(schema: Dict[str, Any]) -> Dict[str, Any]:
+    """Convert a CRM __info__ dict to the flat format expected by Verifiers."""
+
+    if "function" not in schema:  # already flattened
+        return schema
+
+    func = schema["function"]
+
+    # Extract argument list
+    arg_specs: Dict[str, Any] = {}
+    params = func.get("parameters", {})
+    for arg_name, arg_info in params.get("properties", {}).items():
+        arg_specs[arg_name] = {
+            "type": arg_info.get("type", "any"),
+            "description": arg_info.get("description", ""),
+        }
+
+    return {
+        "name": func.get("name", ""),
+        "description": func.get("description", ""),
+        "args": arg_specs,
+        "returns": func.get("returns", {}).get("description", ""),
+        "examples": [],
+    }
 
 
-class CRMArenaPolicyEnv(CRMArenaEnv):
-    """Adapter that adds tool-success + format rewards on top of CRM scoring."""
+# ---------------------------------------------------------------------------
+# Main environment class
+# ---------------------------------------------------------------------------
+
+class CRMArenaPolicyEnv(MultiTurnEnv):
+    """Verifiers environment for the four CRMArena-Pro *policy* tasks."""
 
     def __init__(
         self,
         *,
-        tasks: List[Dict[str, Any]],
-        tools: List[Callable] | None = None,
-        task_index: int | None = None,
+        tasks: Dict[int, Dict[str, Any]],
+        tools: Optional[List[Callable]] = None,
+        max_turns: int = 5,
+        dataset: Optional[Dataset] = None,
+        eval_dataset: Optional[Dataset] = None,
+        seed: int = 42,
         tool_weight: float = 0.1,
         format_weight: float = 0.0,
         **kwargs: Any,
@@ -64,80 +104,119 @@ class CRMArenaPolicyEnv(CRMArenaEnv):
         if tools is None:
             tools = POLICY_TOOLS
 
-        # Accept-but-ignore arguments that the CRMArenaEnv base class does not support
-        self._max_turns = kwargs.pop("max_turns", None)
-        self._dataset: Any | None = kwargs.pop("dataset", None)
-        self._eval_dataset: Any | None = kwargs.pop("eval_dataset", None)
+        # ------------------------------------------------------------------
+        # 1. Wrap the official CRM ToolEnv (executes functions & rewards)
+        # ------------------------------------------------------------------
+        self._crm_env = CRMSandboxToolEnv(tools=tools, tasks=tasks, org_type="original")
 
-        super().__init__(tasks=tasks, tools=tools, task_index=task_index)
+        # ------------------------------------------------------------------
+        # 2. Build / adopt dataset(s)
+        # ------------------------------------------------------------------
+        if dataset is None:
+            rows = [
+                {
+                    "question": task["query"],
+                    "answer": task["answer"],
+                    "task_name": task["task"],
+                }
+                for task in tasks.values()
+            ]
+            dataset = Dataset.from_list(rows)
 
-        # ---------------------------------------------------------------
-        # Instrument litellm.completion so we can count GPT-4o calls.
-        # This is *local* to the environment instance and does not affect
-        # other parts of the application.
-        # ---------------------------------------------------------------
-        import litellm  # import inside to avoid hard dep at module import time
+        # ------------------------------------------------------------------
+        # 3. Parser & rubric – override weights
+        # ------------------------------------------------------------------
+        self.parser = XMLParser(fields=["think", ("tool", "answer")], answer_field="answer")
+        self.env_parser = XMLParser(fields=["result"])
+        rubric = ToolRubric(parser=self.parser, env_parser=self.env_parser, tools=tools)
+        rubric.reward_weights[:3] = [1.0, tool_weight, format_weight]
 
-        self._gpt_calls = 0
+        # ------------------------------------------------------------------
+        # 5. Replace default correct-answer reward with CRM Evaluator (GPT-4o)
+        # ------------------------------------------------------------------
+        from crm_sandbox.env.env import Evaluator  # local import to avoid heavy deps at module load time
 
-        _orig_completion = litellm.completion
+        self._evaluator = Evaluator(model="gpt-4o-2024-08-06", provider="openai")
+        # Build quick lookup -> task info so we can fetch reward_metric for fuzzy/exact etc.
+        self._answer_lookup = {}
+        def _norm(ans):
+            # Lists are unhashable; convert to tuple. None -> "None" to keep hashable.
+            if isinstance(ans, list):
+                return tuple(ans)
+            if ans is None:
+                return ("None",)
+            return (ans,)
 
-        def _counting_completion(*args, **kw):  # type: ignore[override]
-            self._gpt_calls += 1
-            return _orig_completion(*args, **kw)
+        for _t in tasks.values():
+            key = _norm(_t["answer"])
+            if key not in self._answer_lookup:
+                self._answer_lookup[key] = _t
 
-        litellm.completion = _counting_completion  # type: ignore[assignment]
-        self._restore_litellm = lambda: setattr(litellm, "completion", _orig_completion)
+        def _crm_reward(completion, answer, **kwargs):  # type: ignore
+            """Use CRMArena's Evaluator (GPT-4o) to grade the final <answer>."""
+            # Extract assistant <answer> text
+            proposed_ans = ""
+            try:
+                parsed = self.parser.parse_answer(completion)
+                if parsed is not None:
+                    proposed_ans = str(parsed)
+            except Exception:
+                proposed_ans = ""
 
-        # Build rubric for auxiliary rewards
-        self._parser = XMLParser(fields=["think", ("tool", "answer")], answer_field="answer")
-        self._env_parser = XMLParser(fields=["result"])
-        self._rubric = ToolRubric(parser=self._parser, env_parser=self._env_parser, tools=tools)
+            task_info = self._answer_lookup.get(_norm(answer), {})
+            reward_metric = task_info.get("reward_metric", "exact_match")
+            task_name = task_info.get("task", "policy_task")
 
-        # Overwrite first three weights: [ans, tool, format]
-        self._rubric.reward_weights[:3] = [1.0, tool_weight, format_weight]
-
-    # ------------------------------------------------------------------ API #
-    def step(self, action: Dict[str, Any]) -> Tuple[str, float, bool, Dict[str, Any]]:  # type: ignore[override]
-        observation, crm_reward, done, info = super().step(action)
-
-        # Combine rewards only at episode end; intermediate steps keep 0 reward
-        if done:
-            # ``info`` coming from underlying env already contains the trajectory
-            trajectory: List[Dict[str, str]] = info.get("agent_actions", [])
-            tool_score = self._rubric.tool_execution_reward_func(trajectory)
-            fmt_score = self._parser.get_format_reward_func()(trajectory)
-
-            final_reward = (
-                1.0 * crm_reward
-                + self._rubric.reward_weights[1] * tool_score
-                + self._rubric.reward_weights[2] * fmt_score
+            res = self._evaluator.evaluate(
+                proposed_ans,
+                [answer],
+                reward_metric,
+                task_name,
+                [m["content"] for m in completion if isinstance(m, dict)],
             )
+            return res["reward"]
 
-            info["reward_breakdown"] = {
-                "crm_exact": crm_reward,
-                "tool_success": tool_score,
-                "format": fmt_score,
-            }
+        rubric.reward_funcs[0] = _crm_reward
 
-            # expose how many GPT-4o (litellm) calls were made in this episode
-            info["gpt4o_calls"] = self._gpt_calls
-            # reset counter for next episode
-            self._gpt_calls = 0
-        else:
-            final_reward = 0.0
+        # ------------------------------------------------------------------
+        # 4. Build system prompt with *only* policy-tools described
+        # ------------------------------------------------------------------
+        tool_schemas = [_convert_crm_schema(s) for s in self._crm_env.tools_info]
+        tool_descriptions = format_tool_descriptions(tool_schemas)
+        formatted_prompt = DEFAULT_TOOL_PROMPT_TEMPLATE.format(tool_descriptions=tool_descriptions)
 
-        return observation, final_reward, done, info
+        super().__init__(
+            system_prompt=formatted_prompt,
+            parser=self.parser,
+            rubric=rubric,
+            dataset=dataset,
+            eval_dataset=eval_dataset,
+            message_type="chat",
+            max_turns=max_turns,
+            seed=seed,
+            **kwargs,
+        )
 
-    # -------------- optional dataset helpers for trainers --------------- #
-    def get_dataset(self):  # noqa: D401
-        return self._dataset
+    # ------------------------------------------------------------------ MultiTurnEnv overrides
+    def is_completed(self, messages, state, **kwargs):  # noqa: D401
+        """Episode ends when <answer> tag appears or max_turns reached."""
+        return self.parser.parse_answer(messages) is not None
 
-    def get_eval_dataset(self):  # noqa: D401
-        return self._eval_dataset
+    def env_response(self, messages, state, **kwargs):
+        """Execute the selected tool via CRM ToolEnv and wrap result as user."""
+        try:
+            parsed = self.parser.parse(messages[-1]["content"])
+            if hasattr(parsed, "tool") and parsed.tool is not None:
+                result = self._crm_env.call_tool(parsed.tool)
+                formatted = self.env_parser.format(result=result)
+                return {"role": "user", "content": formatted}, state
+        except Exception:
+            pass  # fall through to error message
+        return {"role": "user", "content": "Error: Tool command not found or invalid XML format."}, state
 
-    # ------------------------------------------------------------------ #
-    def __del__(self):
-        """Restore litellm.completion on garbage-collection."""
-        if hasattr(self, "_restore_litellm"):
-            self._restore_litellm() 
+    # -------------- dataset helpers (used by GRPOTrainer) -----------------
+    def get_dataset(self, *args, **kwargs):  # noqa: D401
+        return super().get_dataset(*args, **kwargs)
+
+    def get_eval_dataset(self, *args, **kwargs):  # noqa: D401
+        return super().get_eval_dataset(*args, **kwargs) 

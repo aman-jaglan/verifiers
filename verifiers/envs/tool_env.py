@@ -2,15 +2,10 @@ import inspect
 import json
 from typing import List, Dict, Any, Callable, Tuple
 
-from verifiers import (
-    Message,
-    Messages,
-    MultiTurnEnv,
-    RewardFunc,
-    State,
-    ToolRubric,
-    XMLParser
-)
+from ..types import Message, Messages, State, RewardFunc
+from ..rubrics.tool_rubric import ToolRubric
+from ..parsers.xml_parser import XMLParser
+from .multiturn_env import MultiTurnEnv
 from verifiers.prompts import DEFAULT_TOOL_PROMPT_TEMPLATE
 
 def infer_schema_from_function(func: Callable) -> Dict[str, Any]:

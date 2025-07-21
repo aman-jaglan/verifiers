@@ -784,8 +784,12 @@ Model copies with swapped templates are available here: https://huggingface.co/c
             all_completion_ids.append(completion_ids)
             all_completion_masks.append(completion_mask)
             all_completion_logprobs.append(completion_logprobs)
-            if zero_truncated_completions:
-                all_rewards.append(0)
+            # Zero-out the reward *only* when the current completion was truncated **and**
+            # the caller requested this behaviour. Previously the reward for **all** rollouts
+            # was set to 0 whenever `zero_truncated_completions` was enabled, which wiped
+            # out useful signal and led to constant 0.0 total rewards.
+            if zero_truncated_completions and is_truncated:
+                all_rewards.append(0.0)
             else:
                 all_rewards.append(reward)
         return {

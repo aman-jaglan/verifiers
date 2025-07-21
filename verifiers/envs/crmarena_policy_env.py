@@ -115,7 +115,7 @@ class CRMArenaPolicyEnv(MultiTurnEnv):
         eval_dataset: Optional[Dataset] = None,
         seed: int = 42,
         tool_weight: float = 0.1,
-        format_weight: float = 0.0,
+        format_weight: float = 0.1,
         **kwargs: Any,
     ) -> None:
         if tools is None:
@@ -193,6 +193,7 @@ class CRMArenaPolicyEnv(MultiTurnEnv):
             )
             return res["reward"]
 
+        _crm_reward.__name__ = "gpt_reward_func"
         rubric.reward_funcs[0] = _crm_reward
 
         # ------------------------------------------------------------------

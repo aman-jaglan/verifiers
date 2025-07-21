@@ -6,6 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 from crm_sandbox.agents.utils import get_all_metrics
 import litellm
 import json
+import re
 
 class ChatEnv(object):
     def __init__(
@@ -535,17 +536,20 @@ class Evaluator(object):
             
             
             
-            # Try exact string match first if gt_answer has only one element
             if len(gt_answer) == 1:
                 # Clean up the proposed answer by stripping whitespace and quotes
                 cleaned_proposed = proposed_answer.strip().strip('"').strip("'")
                 # Check if the cleaned proposed answer exactly matches the ground truth
                 if cleaned_proposed == gt_answer[0]:
+                    # DEBUG: fast-path, no GPT call needed
+                    print("✔ Evaluator fast-path: exact string match, skipping GPT extraction")
                     return {
                         "parsed_answer": [cleaned_proposed],
                         "reward": 1
                     }
-                        
+
+            # DEBUG: need GPT extraction
+            print("❗ Evaluator: no exact match, calling GPT extractor")
             parsed_answers = sorted(self.parse_answers(proposed_answer, task_name))
             try:
                 if parsed_answers == sorted(gt_answer):

@@ -64,9 +64,25 @@ def _collect_all_tools() -> list[Callable]:
 # Full exhaustive set of CRM tools
 ALL_CRM_TOOLS: list[Callable] = _collect_all_tools()
 
-# Back-compatibility alias used by external scripts (e.g. train_text_skill.py)
-# Previously this contained a five-tool subset; it now points to the full set.
-POLICY_TOOLS: list[Callable] = ALL_CRM_TOOLS
+# ---------------------------------------------------------------------------
+# Select the 10 tools most relevant for POLICY tasks as requested.
+# ---------------------------------------------------------------------------
+
+_POLICY_TOOL_NAMES = {
+    "issue_soql_query",
+    "issue_sosl_query",
+    "respond",
+    "search_knowledge_articles",
+    "search_products",
+    "get_order_item_ids_by_product",
+    "get_issues",
+    "get_issue_counts",
+    "get_email_messages_by_case_id",
+    "get_livechat_transcript_by_case_id",
+}
+
+# Filter the exhaustive list, keeping order stable
+POLICY_TOOLS: list[Callable] = [t for t in ALL_CRM_TOOLS if t.__name__ in _POLICY_TOOL_NAMES]
 
 # ---------------------------------------------------------------------------
 # Helper to convert CRMArena function-call schema to Verifiers flat schema
@@ -171,14 +187,16 @@ class CRMArenaPolicyEnv(MultiTurnEnv):
 
         def _crm_reward(completion, answer, **kwargs):  # type: ignore
             """Use CRMArena's Evaluator (GPT-4o) to grade the final <answer>."""
-            # Extract assistant <answer> text
-            proposed_ans = ""
-            try:
-                parsed = self.parser.parse_answer(completion)
-                if parsed is not None:
-                    proposed_ans = str(parsed)
-            except Exception:
-                proposed_ans = ""
+            # Extract assistant <answer>. If XMLParser fails, fall back to
+            # CRMArena's own extraction logic so that we don't silently grade
+            # everything as wrong when the tag is missing / malformed.
+            # Send the entire assistant output (concatenated) directly to the
+            # Evaluator. This bypasses XMLParser so the reward signal comes
+            # solely from GPT extraction logic, identical to CRMArena CLI.
+            assistant_text = "\n".join(
+                m["content"] for m in completion if m.get("role") == "assistant"
+            )
+            proposed_ans = assistant_text.strip()
 
             task_info = self._answer_lookup.get(_norm(answer), {})
             reward_metric = task_info.get("reward_metric", "exact_match")

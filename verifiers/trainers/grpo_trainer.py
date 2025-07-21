@@ -1117,7 +1117,7 @@ class GRPOTrainer(Trainer):
                 broadcast_data is not None
             )  # After broadcast, all processes have data
             all_rewards = torch.tensor(
-                broadcast_data["rewards"], device=self.accelerator.device
+                broadcast_data["rewards"], device=self.accelerator.device, dtype=torch.float32
             )
             all_advantages = self._compute_advantages(all_rewards)
 
@@ -1554,10 +1554,10 @@ class GRPOTrainer(Trainer):
                 reward_values = all_reward_dict[reward_key]
                 if isinstance(reward_values, list):
                     reward_tensor = torch.tensor(
-                        reward_values, device=all_rewards.device
+                        reward_values, device=all_rewards.device, dtype=torch.float32
                     )
                 else:
-                    reward_tensor = reward_values
+                    reward_tensor = reward_values.to(torch.float32)
                 mean_reward = reward_tensor.mean().item()
                 self._metrics[mode][f"rewards/{reward_key}"].append(mean_reward)
 

@@ -21,12 +21,12 @@ max_steps: -1                         # use epochs
 max_prompt_length: 8000
 
 # ---- logging & evaluation --------------------------------------------------
-logging_steps: 5
+logging_steps: 1
 log_completions: true
-num_completions_to_print: 4 
-save_steps: 50                       # save model checkpoint every 50 steps
+num_completions_to_print: 1
+save_steps: 10                       # save model checkpoint every 50 steps
 evaluation_strategy: steps
-eval_steps: 50                       # run validation every 50 optimisation steps (~0.1 epoch)
+eval_steps: 5                       # run validation every 50 optimisation steps (~0.1 epoch)
 
 # ---- optimisation ----------------------------------------------------------
 learning_rate: 5.0e-5
@@ -68,9 +68,9 @@ async_generation_timeout: 3600.0
 max_concurrent: 128  # allow up to 1 hour for long multi-turn rollouts
 
 # push updated policy weights to vLLM only every 10 optimiser steps
-weight_sync_steps: 50
+weight_sync_steps: 5
 
 # ---- W&B -------------------------------------------------------------------
 report_to: wandb
-wandb_project: crmarena_text_skill
-wandb_run_name: qwen3_14b_b2b_grpo 
+wandb_project: crmarena_policy_skill
+wandb_run_name: qwen3_14b_policy_grpo 

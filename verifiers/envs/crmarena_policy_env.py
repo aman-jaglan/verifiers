@@ -32,7 +32,7 @@ from crm_sandbox.env.functions import (
 
 from verifiers.envs.crmarena_env import CRMArenaEnv
 from verifiers import XMLParser
-from verifiers.rubrics import ToolRubric
+from verifiers import ToolRubric
 
 # ---------------------------------------------------------------------------
 # Helper: narrow tool list to policy-relevant subset

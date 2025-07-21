@@ -59,23 +59,22 @@ from transformers import TrainingArguments
 
 from verifiers.trainers.grpo_trainer_mp_safe import GRPOMPTrainer
 from verifiers.trainers.grpo_trainer import GRPOConfig
-from verifiers.envs.crmarena_text_env import CRMArenaTextEnv
+from verifiers.envs.crmarena_policy_env import CRMArenaPolicyEnv, POLICY_TOOLS
 from verifiers.utils.model_utils import get_model_and_tokenizer
 
 # Categories and dataset loading logic must replicate the splitter exactly so
 # that saved indices align with row positions.
 
-TEXT_SKILL_CATEGORIES = {
-    "knowledge_qa",
-    "sales_insight_mining",
-    "wrong_stage_rectification",
-    "activity_priority",
-    "named_entity_disambiguation",
+POLICY_TASKS = {
+    "invalid_configuration_identification",
+    "solution_violation_identification",
+    "lead_qualification",
+    "quote_approval",
 }
 
 HF_DATASET_NAME = "Salesforce/CRMArenaPro"
 HF_CONFIG_NAME = "CRMArenaPro"
-MAX_EXAMPLES = 500
+MAX_EXAMPLES = 500  # unchanged – dataset is smaller than this anyway
 
 
 # ---------------------------------------------------------------------------
@@ -84,9 +83,9 @@ MAX_EXAMPLES = 500
 
 
 def _load_filtered_dataset() -> Dataset:
-    """Replicates the filtering + shuffling used by the split script."""
+    """Load only the four policy tasks for RL fine-tuning."""
     ds_b2b = load_dataset(HF_DATASET_NAME, HF_CONFIG_NAME, split="b2b")
-    filtered = ds_b2b.filter(lambda x: x["task"] in TEXT_SKILL_CATEGORIES)
+    filtered = ds_b2b.filter(lambda x: x["task"] in POLICY_TASKS)
 
     if len(filtered) > MAX_EXAMPLES:
         filtered = filtered.shuffle(seed=42).select(range(MAX_EXAMPLES))
@@ -131,7 +130,12 @@ def main() -> None:  # noqa: D401
     # Build task mapping expected by CRMArenaTextEnv (index -> full task dict)
     tasks_by_idx = {i: base_ds[i] for i in range(len(base_ds))}
 
-    env = CRMArenaTextEnv(tasks=tasks_by_idx, max_turns=5, eval_dataset=dataset_val)
+    env = CRMArenaPolicyEnv(
+        tasks=tasks_by_idx,
+        tools=POLICY_TOOLS,
+        max_turns=5,
+        eval_dataset=dataset_val,
+    )
 
     # ----------------- model & tokenizer ------------------------------
     # Read the YAML once to discover which base model checkpoint to load. If the
